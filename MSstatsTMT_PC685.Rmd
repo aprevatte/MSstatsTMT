@@ -1,0 +1,167 @@
+---
+title: "MSstatsTMT_PC685"
+author: "Alex Prevatte"
+date: "5/22/2020"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+```{r}
+
+ if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+ 
+ BiocManager::install("MSstatsTMT")
+
+library(MSstatsTMT)
+# version 1.4.6 and 1.6.0 work for this tutorial
+?MaxQtoMSstatsTMTFormat
+
+# we also use another two pacakges for data manipulation
+# install.packages(c("tidyr", "dplyr"))
+library(tidyr)
+library(dplyr)
+
+ required_packages <- c(packages)
+ installed_packages <- required_packages %in% installed.packages()[,"Package"]
+ missing_packages <- required_packages[!installed_packages]
+ 
+ if ( length(missing_packages) > 0 ) {
+   warning(sprintf('FOLLOWING PACKAGES NEED TO BE INSTALLED STILL:\n\t%s\n',
+                   paste(missing_packages, collapse=', ')))
+ } else{
+   message('ALL PACKAGES ARE INSTALLED, WE\'RE GOOD TO GO!\n')
+ } 
+
+# First, get protein ID information
+proteinGroups <- read.table("/Users/awprevatte/proteinGroups.txt", sep = "\t", header = TRUE)
+
+# Read in MaxQuant file: evidence.txt
+evi <- read.table("/Users/awprevatte/evidence.txt", sep="\t", header=TRUE)
+colnames(evi)
+runs <- unique(evi$Raw.file) # MS runs
+Run_info <- data.frame(Run = runs) # initialize the run file 
+Run_info
+
+Run_info$Mixture <- ""
+Run_info$TechRepMixture <- ""
+Run_info$Fraction <- ""
+
+#save the channel file and fill in the condition and biological replicate information manually
+write.csv(Run_info, file = "/Users/awprevatte/PC685_RunInfo.csv", row.names = FALSE)
+
+#Now the run information should be available in the file
+Run_info <- read.csv(file = "/Users/awprevatte/PC685_RunInfo.csv")
+
+Run_info
+
+channels <- c("channel.1", "channel.2", "channel.3", "channel.4", "channel.5", "channel.6", "channel.7", "channel.8", "channel.9", "channel.10")
+mixtures <- unique(Run_info$Mixture)
+mixtures
+
+Group_info <- expand.grid(channels, mixtures)
+colnames(Group_info) <- c("Channel", "Mixture")
+head(Group_info)
+
+write.csv(Group_info, file = "/Users/awprevatte/PC685_Groups.csv", row.names = FALSE)
+
+## Now the condition information should be available in the file
+Group_info_filled <- read.csv(file = "/Users/awprevatte/PC685_Groups.csv")
+head(Group_info_filled)
+
+annotation <- full_join(Run_info, Group_info_filled)
+nrow(annotation)
+
+write.csv(annotation, file = "/Users/awprevatte/PC685_annotation.csv", row.names = FALSE)
+
+head(annotation)
+
+# reformating and pre-processing for MaxQuant output.
+# no protein with 1 peptide
+input.maxquant <- MaxQtoMSstatsTMTFormat(evidence=evi, 
+                                         annotation=annotation,
+                                         proteinGroups=proteinGroups)
+head(input.maxquant)
+?input.maxquant
+
+#### Preliminary check
+
+length(unique(input.maxquant$ProteinName)) 
+# show the spiked-in proteins
+#unique(input.maxquant[grepl("ups",input.maxquant$ProteinName),]$ProteinName)
+
+?proteinSummarization
+quant.maxquant <- proteinSummarization(input.maxquant,
+                                       method="MedianPolish",
+                                       global_norm=TRUE,
+                                       reference_norm=FALSE,
+                                       remove_norm_channel = TRUE,
+                                       remove_empty_channel = TRUE)
+
+#save(quant.maxquant, file='data/data_MaxQuant_TMT/quant.maxquant.rda')
+
+head(quant.maxquant)
+
+# if you have many MS runs, adjust width of plot (make wider)
+# Profile plot for the normalized data 
+dataProcessPlotsTMT(data.peptide = input.maxquant, # PSM-level data
+                    data.summarization = quant.maxquant, # protein-level data
+                    type = 'ProfilePlot', # choice of visualization
+                    width = 21,
+                    height = 7,
+                    originalPlot = FALSE,
+                    which.Protein = 'A0AVT1',
+                    address="/Users/awprevatte/PC685_ProfilePlot") 
+
+#no normalization below
+quant.maxquant.nonorm <- proteinSummarization(data = input.maxquant,
+                                              global_norm = FALSE,
+                                              reference_norm = FALSE,
+                                              remove_norm_channel = FALSE,
+                                              remove_empty_channel = TRUE)
+
+#different summary option - "median"
+quant.maxquant.median <- proteinSummarization(data = input.maxquant,
+                                              method = "Median", 
+                                              global_norm = FALSE,
+                                              reference_norm = FALSE,
+                                              remove_norm_channel = FALSE,
+                                              remove_empty_channel = TRUE)
+?proteinSummarization
+
+
+##Pairwise comparison
+#filter out norm condition
+quant.maxquant <- quant.maxquant %>%  filter(Condition != "Norm")
+?groupComparisonTMT()
+test.maxquant.pairwise <- groupComparisonTMT(data = quant.maxquant, 
+                                             contrast.matrix = "pairwise",
+                                             moderated = TRUE, # do moderated t test
+                                             adj.method = "BH") # multiple comparison adjustment
+
+# show the comparisons
+unique(test.maxquant.pairwise$Label)
+
+colnames(test.maxquant.pairwise)
+
+#pval <- sapply(test.maxquant.pairwise$adj.pvalue, function(x) 1/x)
+#test.maxquant.pairwise$adj.pvalue <- pval
+# Show test result
+# Label : which comparison is used
+# log2FC : estimated log2 fold change between two conditions (the contrast)
+# adj.pvalue : adjusted p value
+head(test.maxquant.pairwise)
+
+save(test.maxquant.pairwise, file='data/data_MaxQuant_TMT/mq.result.rda')
+write.csv(test.maxquant.pairwise, file='data/data_MaxQuant_TMT/testResult_mq.csv')
+
+library(MSstats)
+?groupComparisonPlots()
+groupComparisonPlots(data=test.maxquant.pairwise, 
+                     type="VolcanoPlot",
+                     sig= 0.05,
+                     logBase.pvalue=10, 
+                     ProteinName=TRUE,
+                     address="/Users/awprevatte/mq_pairwise_")
+
+```
